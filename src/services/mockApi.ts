@@ -1,10 +1,11 @@
 // file: src/services/mockApi.ts
-import { IImageGenerator, IVLMAnalyzer, ITTSGenerator, ImageGenResult, VLMAnalysisResult, TTSResult, ArtStyle } from "../interfaces/api";
+import { IImageGenerator, IVLMAnalyzer, ITTSGenerator, ImageGenResult, VLMAnalysisResult, TTSResult, ArtStyle, ImageSourceType } from "../interfaces/api";
 
 export class MockImageGenerator implements IImageGenerator {
   async generateFromScribble(
     scribbleBase64: string,
-    style: ArtStyle
+    style: ArtStyle,
+    sourceType?: ImageSourceType
   ): Promise<ImageGenResult> {
     // 模拟 2 秒图像生成延迟
     await new Promise(resolve => setTimeout(resolve, 2000));

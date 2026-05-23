@@ -1,44 +1,34 @@
 // file: src/services/realApi.ts
-import { IImageGenerator, IVLMAnalyzer, ITTSGenerator, ImageGenResult, VLMAnalysisResult, TTSResult, ArtStyle } from "../interfaces/api";
+import { IImageGenerator, IVLMAnalyzer, ITTSGenerator, ImageGenResult, VLMAnalysisResult, TTSResult, ArtStyle, ImageSourceType } from "../interfaces/api";
 import { OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL } from "../config/apiConfig";
 
 // ==========================================
-// 1. 图像生成服务 (保留 Fal.ai Scribble 接口，供黑客松涂鸦生成使用)
+// 1. 图像生成服务 (OpenAI Next image endpoint via local API route)
 // ==========================================
 export class RealImageGenerator implements IImageGenerator {
   async generateFromScribble(
     scribbleBase64: string,
-    style: ArtStyle
+    style: ArtStyle,
+    sourceType: ImageSourceType = "drawing"
   ): Promise<ImageGenResult> {
-    const promptMap = {
-      claymation: "vinyl toy style, 3D claymation, chibi 3D render, Pop Mart aesthetics, whimsical clay monster, solid monochrome background",
-      woolfelt: "handmade wool felt plushie monster, fuzzy needle-felted texture, cozy toy, solid background",
-      crayon: "crayon scribble art, children storybook illustration, colorful pencil texture, white background",
-      popmart: "cute vinyl toy style, Pop Mart designer toy, smooth reflections, solid background"
-    };
-
-    // 默认使用 Fal.ai 官方的高速 Flux Canny 接口进行手绘图深度拟真
-    const res = await fetch("https://queue.fal.run/fal-ai/flux/canny", {
+    const res = await fetch("/api/image", {
       method: "POST",
       headers: {
-        "Authorization": `Key ${process.env.NEXT_PUBLIC_FAL_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        image_url: scribbleBase64,
-        prompt: promptMap[style] || promptMap.claymation,
-        image_size: "square_hd",
-        num_inference_steps: 28,
-        enable_safety_checker: true
+        scribbleBase64,
+        style,
+        sourceType
       })
     });
 
     if (!res.ok) {
-      throw new Error(`Fal.ai image generation failed: ${res.statusText}`);
+      const errorText = await res.text();
+      throw new Error(`OpenAI Next image generation failed: ${errorText || res.statusText}`);
     }
 
-    const result = await res.json();
-    return { imageUrl: result.images[0].url };
+    return await res.json() as ImageGenResult;
   }
 }
 
@@ -126,44 +116,26 @@ export class RealVLMAnalyzer implements IVLMAnalyzer {
 }
 
 // ==========================================
-// 3. 真实语音合成服务 (标准 OpenAI Audio Speech 格式)
+// 3. 真实语音合成服务 (OpenAI Next Fish TTS via local API route)
 // ==========================================
 export class RealTTSGenerator implements ITTSGenerator {
   async generateSpeech(text: string, voiceProfile: string): Promise<TTSResult> {
-    
-    // 映射声音配置到 OpenAI 官方提供的声音
-    let selectedVoice = "alloy"; // 默认
-    if (voiceProfile === "hyper_kid") {
-      selectedVoice = "shimmer"; // 萌系偏高音
-    } else if (voiceProfile === "gentle_sloth") {
-      selectedVoice = "nova"; // 温柔女声
-    } else if (voiceProfile === "stubborn_goblin") {
-      selectedVoice = "onyx"; // 低沉男声
-    } else if (voiceProfile === "robotic_toy") {
-      selectedVoice = "echo"; // 机械科技感
-    }
-
-    const res = await fetch(`${OPENAI_BASE_URL}/audio/speech`, {
+    const res = await fetch("/api/tts", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "tts-1",
-        input: text,
-        voice: selectedVoice,
-        response_format: "mp3"
+        text,
+        voiceProfile
       })
     });
 
     if (!res.ok) {
-      throw new Error(`OpenAI TTS generation failed: ${res.statusText}`);
+      const errorText = await res.text();
+      throw new Error(`OpenAI Next TTS generation failed: ${errorText || res.statusText}`);
     }
 
-    const blob = await res.blob();
-    // 转换为前端可以直接播放的 Blob Object URL
-    const audioUrl = URL.createObjectURL(blob);
-    return { audioUrl };
+    return await res.json() as TTSResult;
   }
 }

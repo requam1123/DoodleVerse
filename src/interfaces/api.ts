@@ -6,16 +6,19 @@ export interface ImageGenResult {
 }
 
 export type ArtStyle = 'claymation' | 'woolfelt' | 'crayon' | 'popmart';
+export type ImageSourceType = 'drawing' | 'webcam';
 
 export interface IImageGenerator {
   /**
    * 将涂鸦 Base64 转化为精美手办/玩具图像
    * @param scribbleBase64 涂鸦画板导出的 base64 字符串
    * @param style 用户选择的风格: 'claymation' | 'woolfelt' | 'crayon' | 'popmart'
+   * @param sourceType 输入来源：画板或摄像头
    */
   generateFromScribble(
     scribbleBase64: string,
-    style: ArtStyle
+    style: ArtStyle,
+    sourceType?: ImageSourceType
   ): Promise<ImageGenResult>;
 }
 

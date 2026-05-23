@@ -2,17 +2,20 @@
 'use client';
 
 import React, { useRef, useState, useEffect } from 'react';
-import { Sparkles, Trash2, RotateCcw, Volume2, Plus, Check, Play, Shield, Compass, Heart, Award } from 'lucide-react';
-import { ArtStyle, VLMAnalysisResult } from '../interfaces/api';
-import { MockImageGenerator, MockVLMAnalyzer, MockTTSGenerator } from '../services/mockApi';
+import { Sparkles, Trash2, RotateCcw, Volume2, Plus, Check, Play, Shield, Compass, Heart, Award, Pencil, Camera, Aperture } from 'lucide-react';
+import { ArtStyle, ImageSourceType, VLMAnalysisResult } from '../interfaces/api';
+import { MockVLMAnalyzer } from '../services/mockApi';
+import { RealImageGenerator, RealTTSGenerator } from '../services/realApi';
 
-const imageGen = new MockImageGenerator();
+const imageGen = new RealImageGenerator();
 const vlmAnalyzer = new MockVLMAnalyzer();
-const ttsGen = new MockTTSGenerator();
+const ttsGen = new RealTTSGenerator();
+const CANVAS_SIZE = 400;
 
 interface CollectedMonster extends VLMAnalysisResult {
   id: string;
   imageUrl: string;
+  audioUrl?: string;
   style: ArtStyle;
   timestamp: string;
 }
@@ -20,12 +23,19 @@ interface CollectedMonster extends VLMAnalysisResult {
 export default function Home() {
   // Canvas State
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const webcamCaptureCanvasRef = useRef<HTMLCanvasElement>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [color, setColor] = useState('#8b5cf6'); // Default purple
   const [lineWidth, setLineWidth] = useState(8);
   const [isEraser, setIsEraser] = useState(false);
   const [canvasHistory, setCanvasHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [inputMode, setInputMode] = useState<ImageSourceType>('drawing');
+  const [webcamStatus, setWebcamStatus] = useState<'idle' | 'starting' | 'ready' | 'error'>('idle');
+  const [webcamError, setWebcamError] = useState('');
+  const [capturedWebcamImage, setCapturedWebcamImage] = useState('');
 
   // App Pipeline State
   const [selectedStyle, setSelectedStyle] = useState<ArtStyle>('claymation');
@@ -37,26 +47,36 @@ export default function Home() {
   const [cardFlipped, setCardFlipped] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
-  // Initialize Canvas
+  // Initialize or restore the drawing canvas whenever it is mounted.
   useEffect(() => {
+    if (inputMode !== 'drawing') return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Set canvas resolution matching style size
-    canvas.width = 400;
-    canvas.height = 400;
-    
-    // Fill white background for sketch export quality
+    canvas.width = CANVAS_SIZE;
+    canvas.height = CANVAS_SIZE;
+
+    const currentState = canvasHistory[historyIndex];
+    if (currentState) {
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      };
+      img.src = currentState;
+      return;
+    }
+
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Save initial state
+
     const dataUrl = canvas.toDataURL();
     setCanvasHistory([dataUrl]);
     setHistoryIndex(0);
-  }, []);
+  }, [inputMode]);
 
   // Load collection from localStorage
   useEffect(() => {
@@ -70,15 +90,82 @@ export default function Home() {
     }
   }, []);
 
-  // Speak script helper
-  const speakText = (text: string, voiceProfile: string) => {
+  useEffect(() => {
+    if (inputMode !== 'webcam') {
+      webcamStreamRef.current?.getTracks().forEach(track => track.stop());
+      webcamStreamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      setWebcamStatus('idle');
+      return;
+    }
+
+    let cancelled = false;
+
+    const startWebcam = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setWebcamStatus('error');
+        setWebcamError('当前浏览器不支持摄像头访问。');
+        return;
+      }
+
+      setWebcamStatus('starting');
+      setWebcamError('');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: { ideal: 1024 },
+            height: { ideal: 1024 }
+          },
+          audio: false
+        });
+
+        if (cancelled) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+
+        webcamStreamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        setWebcamStatus('ready');
+      } catch (error) {
+        console.error(error);
+        setWebcamStatus('error');
+        setWebcamError('无法打开摄像头，请检查浏览器权限。');
+      }
+    };
+
+    startWebcam();
+
+    return () => {
+      cancelled = true;
+      webcamStreamRef.current?.getTracks().forEach(track => track.stop());
+      webcamStreamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+    };
+  }, [inputMode]);
+
+  // Play generated cloud TTS audio. Falls back to Web Speech for older saved cards.
+  const speakText = (text: string, voiceProfile: string, audioUrl?: string) => {
+    if (audioUrl && audioUrl !== "mock") {
+      const audio = new Audio(audioUrl);
+      setIsSpeaking(true);
+      audio.onended = () => setIsSpeaking(false);
+      audio.onerror = () => setIsSpeaking(false);
+      audio.play().catch(() => setIsSpeaking(false));
+      return;
+    }
+
     if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel(); // Stop current speech
+    window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'zh-CN';
 
-    // Set rates & pitches depending on personality profile
     if (voiceProfile === 'gentle_sloth') {
       utterance.rate = 0.75;
       utterance.pitch = 0.8;
@@ -138,6 +225,18 @@ export default function Home() {
     saveStateToHistory();
   };
 
+  const getCanvasPoint = (
+    canvas: HTMLCanvasElement,
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
+  ) => {
+    const rect = canvas.getBoundingClientRect();
+    const pointer = 'touches' in e ? e.touches[0] : e;
+    return {
+      x: (pointer.clientX - rect.left) * (canvas.width / rect.width),
+      y: (pointer.clientY - rect.top) * (canvas.height / rect.height)
+    };
+  };
+
   // Drawing Handlers
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -145,15 +244,7 @@ export default function Home() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const rect = canvas.getBoundingClientRect();
-    let x, y;
-    if ('touches' in e) {
-      x = e.touches[0].clientX - rect.left;
-      y = e.touches[0].clientY - rect.top;
-    } else {
-      x = e.clientX - rect.left;
-      y = e.clientY - rect.top;
-    }
+    const { x, y } = getCanvasPoint(canvas, e);
 
     ctx.beginPath();
     ctx.moveTo(x, y);
@@ -167,17 +258,11 @@ export default function Home() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const rect = canvas.getBoundingClientRect();
-    let x, y;
     if ('touches' in e) {
       // Prevents page bounce/scrolling while drawing
       if (e.cancelable) e.preventDefault();
-      x = e.touches[0].clientX - rect.left;
-      y = e.touches[0].clientY - rect.top;
-    } else {
-      x = e.clientX - rect.left;
-      y = e.clientY - rect.top;
     }
+    const { x, y } = getCanvasPoint(canvas, e);
 
     ctx.lineTo(x, y);
     ctx.strokeStyle = isEraser ? '#ffffff' : color;
@@ -194,24 +279,58 @@ export default function Home() {
     }
   };
 
+  const captureWebcamFrame = () => {
+    const video = videoRef.current;
+    const captureCanvas = webcamCaptureCanvasRef.current;
+    if (!video || !captureCanvas || video.readyState < 2) return '';
+
+    const size = 1024;
+    captureCanvas.width = size;
+    captureCanvas.height = size;
+
+    const ctx = captureCanvas.getContext('2d');
+    if (!ctx) return '';
+
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+    if (!sourceWidth || !sourceHeight) return '';
+
+    const sourceSize = Math.min(sourceWidth, sourceHeight);
+    const sourceX = (sourceWidth - sourceSize) / 2;
+    const sourceY = (sourceHeight - sourceSize) / 2;
+
+    ctx.drawImage(video, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size);
+    const image = captureCanvas.toDataURL('image/png');
+    setCapturedWebcamImage(image);
+    return image;
+  };
+
   // Pipeline Execution Trigger
   const handleAwaken = async () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (inputMode === 'drawing' && !canvas) return;
 
-    const scribbleBase64 = canvas.toDataURL('image/png');
+    const sourceImageBase64 =
+      inputMode === 'webcam'
+        ? capturedWebcamImage || captureWebcamFrame()
+        : canvas?.toDataURL('image/png') || '';
+
+    if (!sourceImageBase64) {
+      alert(inputMode === 'webcam' ? '请先允许摄像头并捕捉一张照片。' : '请先在画板上画点什么。');
+      return;
+    }
     
     setIsLoading(true);
     setCardFlipped(false);
     
     try {
-      // Step 1: Fal.ai Image Generation
-      setLoadingStep('🌈 正在融合涂鸦并进行3D数字雕刻...');
-      const imgRes = await imageGen.generateFromScribble(scribbleBase64, selectedStyle);
+      // Step 1: OpenAI Next Image Generation
+      setLoadingStep(inputMode === 'webcam' ? '📷 正在读取镜头画面并重塑数字生命...' : '🌈 正在融合涂鸦并进行3D数字雕刻...');
+      const imgRes = await imageGen.generateFromScribble(sourceImageBase64, selectedStyle, inputMode);
       
       // Step 2: Gemini VLM Analysis
       setLoadingStep('🧠 Gemini正在读取外形并塑造独特个性...');
-      const vlmRes = await vlmAnalyzer.analyzeMonster(scribbleBase64, imgRes.imageUrl, monsterName.trim());
+      const vlmRes = await vlmAnalyzer.analyzeMonster(sourceImageBase64, imgRes.imageUrl, monsterName.trim());
       
       // Step 3: Speech audio synthetic (TTS)
       setLoadingStep('⚡ 注入声线，赋予生命之声...');
@@ -221,6 +340,7 @@ export default function Home() {
         ...vlmRes,
         id: Math.random().toString(36).substring(2, 11),
         imageUrl: imgRes.imageUrl,
+        audioUrl: ttsRes.audioUrl,
         style: selectedStyle,
         timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
       };
@@ -231,7 +351,7 @@ export default function Home() {
       // Flip the card and play voice after brief layout render
       setTimeout(() => {
         setCardFlipped(true);
-        speakText(newMonster.script, newMonster.voiceProfile);
+        speakText(newMonster.script, newMonster.voiceProfile, newMonster.audioUrl);
       }, 300);
 
     } catch (e) {
@@ -256,7 +376,7 @@ export default function Home() {
   const selectFromCollection = (monster: CollectedMonster) => {
     setCardMonster(monster);
     setCardFlipped(true);
-    speakText(monster.script, monster.voiceProfile);
+    speakText(monster.script, monster.voiceProfile, monster.audioUrl);
   };
 
   // Clear all collected
@@ -286,9 +406,10 @@ export default function Home() {
         <section className="lg:col-span-7 glass-panel p-6 flex flex-col gap-6">
           <div className="flex justify-between items-center border-b border-gray-800 pb-3">
             <h2 className="text-lg font-bold text-gray-200 flex items-center gap-2">
-              🎨 简笔画画板
+              {inputMode === 'drawing' ? '🎨 简笔画画板' : '📷 摄像头捕捉'}
             </h2>
-            <div className="flex gap-2">
+            {inputMode === 'drawing' && (
+              <div className="flex gap-2">
               <button 
                 onClick={undo}
                 disabled={historyIndex <= 0}
@@ -305,82 +426,141 @@ export default function Home() {
                 <Trash2 size={18} />
               </button>
             </div>
+            )}
           </div>
 
-          {/* Draw Board Container */}
-          <div className="relative w-full aspect-square max-w-[420px] mx-auto bg-white rounded-2xl overflow-hidden border border-gray-800 shadow-inner">
-            <canvas
-              ref={canvasRef}
-              onMouseDown={startDrawing}
-              onMouseMove={draw}
-              onMouseUp={stopDrawing}
-              onMouseLeave={stopDrawing}
-              onTouchStart={startDrawing}
-              onTouchMove={draw}
-              onTouchEnd={stopDrawing}
-              className="w-full h-full cursor-crosshair block"
-              style={{ touchAction: 'none' }}
-            />
+          <div className="grid grid-cols-2 gap-2 rounded-xl bg-gray-950/50 p-1 border border-gray-800">
+            <button
+              onClick={() => setInputMode('drawing')}
+              className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${inputMode === 'drawing' ? 'bg-violet-600 text-white' : 'text-gray-400 hover:bg-gray-900 hover:text-gray-200'}`}
+            >
+              <Pencil size={16} />
+              画板
+            </button>
+            <button
+              onClick={() => setInputMode('webcam')}
+              className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${inputMode === 'webcam' ? 'bg-violet-600 text-white' : 'text-gray-400 hover:bg-gray-900 hover:text-gray-200'}`}
+            >
+              <Camera size={16} />
+              摄像头
+            </button>
           </div>
 
-          {/* Color & Size Controls */}
-          <div className="flex flex-wrap items-center gap-4 justify-between bg-gray-900/40 p-4 rounded-xl">
-            {/* Color Palette */}
-            <div className="flex flex-col gap-2">
-              <span className="text-xs text-gray-400">画笔颜色:</span>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { hex: '#8b5cf6', label: '紫色' },
-                  { hex: '#ec4899', label: '粉色' },
-                  { hex: '#3b82f6', label: '蓝色' },
-                  { hex: '#eab308', label: '黄色' },
-                  { hex: '#22c55e', label: '绿色' },
-                  { hex: '#ef4444', label: '红色' },
-                  { hex: '#0f172a', label: '深黑' },
-                ].map(c => (
-                  <button
-                    key={c.hex}
-                    onClick={() => {
-                      setColor(c.hex);
-                      setIsEraser(false);
-                    }}
-                    className={`w-7 h-7 rounded-full border-2 transition-transform ${color === c.hex && !isEraser ? 'scale-125 border-white shadow-lg' : 'border-transparent'}`}
-                    style={{ backgroundColor: c.hex }}
-                    title={c.label}
-                  />
-                ))}
+          {inputMode === 'drawing' ? (
+            <>
+              {/* Draw Board Container */}
+              <div className="relative w-full aspect-square max-w-[420px] mx-auto bg-white rounded-2xl overflow-hidden border border-gray-800 shadow-inner">
+                <canvas
+                  ref={canvasRef}
+                  width={CANVAS_SIZE}
+                  height={CANVAS_SIZE}
+                  onMouseDown={startDrawing}
+                  onMouseMove={draw}
+                  onMouseUp={stopDrawing}
+                  onMouseLeave={stopDrawing}
+                  onTouchStart={startDrawing}
+                  onTouchMove={draw}
+                  onTouchEnd={stopDrawing}
+                  className="w-full h-full cursor-crosshair block"
+                  style={{ touchAction: 'none' }}
+                />
               </div>
-            </div>
 
-            {/* Brush Type Toggle */}
-            <div className="flex gap-2">
-              <button
-                onClick={() => setIsEraser(false)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${!isEraser ? 'bg-violet-600/30 text-violet-200 border-violet-500' : 'bg-gray-800 text-gray-400 border-transparent'}`}
-              >
-                ✏️ 铅笔
-              </button>
-              <button
-                onClick={() => setIsEraser(true)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${isEraser ? 'bg-violet-600/30 text-violet-200 border-violet-500' : 'bg-gray-800 text-gray-400 border-transparent'}`}
-              >
-                🧽 橡皮擦
-              </button>
-            </div>
+              {/* Color & Size Controls */}
+              <div className="flex flex-wrap items-center gap-4 justify-between bg-gray-900/40 p-4 rounded-xl">
+                {/* Color Palette */}
+                <div className="flex flex-col gap-2">
+                  <span className="text-xs text-gray-400">画笔颜色:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { hex: '#8b5cf6', label: '紫色' },
+                      { hex: '#ec4899', label: '粉色' },
+                      { hex: '#3b82f6', label: '蓝色' },
+                      { hex: '#eab308', label: '黄色' },
+                      { hex: '#22c55e', label: '绿色' },
+                      { hex: '#ef4444', label: '红色' },
+                      { hex: '#0f172a', label: '深黑' },
+                    ].map(c => (
+                      <button
+                        key={c.hex}
+                        onClick={() => {
+                          setColor(c.hex);
+                          setIsEraser(false);
+                        }}
+                        className={`w-7 h-7 rounded-full border-2 transition-transform ${color === c.hex && !isEraser ? 'scale-125 border-white shadow-lg' : 'border-transparent'}`}
+                        style={{ backgroundColor: c.hex }}
+                        title={c.label}
+                      />
+                    ))}
+                  </div>
+                </div>
 
-            {/* Line Width Slider */}
-            <div className="flex flex-col gap-2 min-w-[100px]">
-              <span className="text-xs text-gray-400">粗细: {lineWidth}px</span>
-              <input
-                type="range"
-                min="3"
-                max="24"
-                value={lineWidth}
-                onChange={e => setLineWidth(Number(e.target.value))}
-                className="w-full h-1 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-violet-500"
-              />
+                {/* Brush Type Toggle */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setIsEraser(false)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${!isEraser ? 'bg-violet-600/30 text-violet-200 border-violet-500' : 'bg-gray-800 text-gray-400 border-transparent'}`}
+                  >
+                    ✏️ 铅笔
+                  </button>
+                  <button
+                    onClick={() => setIsEraser(true)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${isEraser ? 'bg-violet-600/30 text-violet-200 border-violet-500' : 'bg-gray-800 text-gray-400 border-transparent'}`}
+                  >
+                    🧽 橡皮擦
+                  </button>
+                </div>
+
+                {/* Line Width Slider */}
+                <div className="flex flex-col gap-2 min-w-[100px]">
+                  <span className="text-xs text-gray-400">粗细: {lineWidth}px</span>
+                  <input
+                    type="range"
+                    min="3"
+                    max="24"
+                    value={lineWidth}
+                    onChange={e => setLineWidth(Number(e.target.value))}
+                    className="w-full h-1 bg-gray-800 rounded-lg appearance-none cursor-pointer accent-violet-500"
+                  />
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <div className="relative w-full aspect-square max-w-[420px] mx-auto bg-slate-950 rounded-2xl overflow-hidden border border-gray-800 shadow-inner">
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover scale-x-[-1]"
+                  playsInline
+                  muted
+                />
+                {capturedWebcamImage && (
+                  <img
+                    src={capturedWebcamImage}
+                    alt="Captured webcam frame"
+                    className="absolute bottom-3 right-3 w-20 h-20 rounded-lg object-cover border border-white/20 shadow-lg"
+                  />
+                )}
+                {webcamStatus !== 'ready' && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 text-center px-6">
+                    <Camera size={36} className="text-violet-300 mb-3" />
+                    <p className="text-sm font-semibold text-gray-200">
+                      {webcamStatus === 'starting' ? '正在打开摄像头...' : webcamError || '等待摄像头权限'}
+                    </p>
+                  </div>
+                )}
+                <canvas ref={webcamCaptureCanvasRef} className="hidden" />
+              </div>
+              <button
+                onClick={captureWebcamFrame}
+                disabled={webcamStatus !== 'ready'}
+                className="w-full py-3 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-200 text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Aperture size={17} />
+                {capturedWebcamImage ? '重新捕捉画面' : '捕捉当前画面'}
+              </button>
             </div>
-          </div>
+          )}
 
           {/* Child-Friendly Style Selector */}
           <div className="flex flex-col gap-2">
@@ -498,7 +678,7 @@ export default function Home() {
                       <img 
                         src={cardMonster.imageUrl} 
                         alt={cardMonster.name} 
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-contain"
                       />
                       <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded text-[10px] font-bold bg-black/60 border border-white/10 text-pink-300">
                         {cardMonster.personality}
@@ -540,7 +720,7 @@ export default function Home() {
                     {/* Card Options: Save and Repeat TTS */}
                     <div className="flex justify-between gap-3 mt-4 pt-2 border-t border-gray-800/60">
                       <button
-                        onClick={() => speakText(cardMonster.script, cardMonster.voiceProfile)}
+                        onClick={() => speakText(cardMonster.script, cardMonster.voiceProfile, cardMonster.audioUrl)}
                         className={`flex-1 py-2 px-3 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-colors ${isSpeaking ? 'ring-2 ring-violet-500' : ''}`}
                       >
                         <Volume2 size={13} className={isSpeaking ? 'animate-bounce' : ''} />
@@ -598,7 +778,7 @@ export default function Home() {
                   <img 
                     src={monster.imageUrl} 
                     alt={monster.name}
-                    className="w-full h-full object-cover"
+                    className="w-full h-full object-contain"
                   />
                   <span className="absolute bottom-1 right-1 bg-black/60 border border-white/10 text-[9px] px-1 rounded font-bold text-violet-300">
                     {monster.style}
